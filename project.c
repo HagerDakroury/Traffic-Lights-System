@@ -1,4 +1,3 @@
-
 #include <HAL.h>
 #include "tm4c123gh6pm.h"
 #include "LCD.h"
@@ -12,6 +11,7 @@
 
 int run=0;
 int train=0;
+int suspended=0;
 
 xTaskHandle xRedHandle;
 xTaskHandle xGreenHandle;
@@ -24,6 +24,29 @@ static void vTask2( void *pvParameters );
 static void vTask3( void *pvParameters );
 
 
+void vApplicationIdleHook(){
+		for( ;; )
+	{
+if(train==1){
+	
+	train=2;
+	vTaskResume(xTrainHandle);
+
+	}
+
+	if(train==3){
+	
+	train=0;
+	suspended=0;
+	  vTaskSuspend(xTrainHandle);
+		
+		vTaskResume(xRedHandle);
+		vTaskResume(xGreenHandle);
+
+	}
+	
+}
+	}
 
 
 void PortF_Init(void);
@@ -76,16 +99,28 @@ void SwitchHandler(uint32_t pinMap)
 		
 		//vTaskPrioritySet(xTrainHandle, 5);
 
-		/*if(train){
-		train=0;
-		vTaskPrioritySet(xRedHandle, 5);
+		if(train==2){
+		train=3;
+		GPIO_RearmInterrupt(&PINDEF(PORTF, (PinName_t)(PIN0 | PIN4)));
+
 		}
-		else{
-		train=1;*/
+		else if(train==0 ){
+		train=1;
+		GPIO_RearmInterrupt(&PINDEF(PORTF, (PinName_t)(PIN0 | PIN4)));
+
+		}
+		/*if(train==1){
+			train=2;
+		}
 	
 		// This will attempt a wake the higher priority SwitchTask and continue
 	//	execution there.
-	BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+		
+		else{
+			if(train==3){
+				vTaskResume(xTrainHandle);}*/
+
+	/*BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 	
 	// Give the semaphore and unblock the SwitchTask.
 	xSemaphoreGiveFromISR(switchSemaphore_, &xHigherPriorityTaskWoken);
@@ -93,7 +128,8 @@ void SwitchHandler(uint32_t pinMap)
 	// If the SwitchTask was successfully woken, then yield execution to it
 	//	and go there now (instead of changing context to another task).
 	portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
-		}
+		}*/
+	}
 	
 	
 	}
@@ -108,7 +144,30 @@ void vSwitchTask(void *pvParameters)
 	for( ;; )
 	{
 
-		// Block until the switch ISR has signaled a switch press event...
+		TickType_t xLastWakeTime;
+	  xLastWakeTime = xTaskGetTickCount();
+		
+		vTaskSuspend(xGreenHandle);
+		vTaskSuspend(xRedHandle);
+		suspended=1;
+
+
+		GPIO_PORTF_DATA_R = 0xe;    
+		vTaskDelayUntil( &xLastWakeTime, pdMS_TO_TICKS( 5000 ) );	
+		
+		
+if(suspended){	
+	  suspended=0;
+	  train=0;
+		vTaskResume(xRedHandle);
+		vTaskResume(xGreenHandle);
+		vTaskSuspend(xTrainHandle);
+}
+
+
+
+
+		/*// Block until the switch ISR has signaled a switch press event...
 		BaseType_t taken = xSemaphoreTake(switchSemaphore_, portMAX_DELAY);
 		
 			// Rearm interrupts for both switches.
@@ -119,9 +178,8 @@ void vSwitchTask(void *pvParameters)
 			TickType_t xLastWakeTime = xTaskGetTickCount();
 
 		GPIO_PORTF_DATA_R = 0xe;    
-		vTaskDelay( pdMS_TO_TICKS( 3000 ) );	
-			train=0;
-			}
+		vTaskDelay( pdMS_TO_TICKS( 6000 ) );	
+			}*/
 		}
 		
 	
@@ -141,19 +199,19 @@ void vSwitchTask(void *pvParameters)
 		TickType_t xLastWakeTime;
 	  xLastWakeTime = xTaskGetTickCount();
 		
-		vTaskSuspend(xHazardHandle);
-		vTaskSuspend(xGreenHandle);
+		vTaskSuspend(xGreenHandle);		
+
 
 		GPIO_PORTF_DATA_R = 0x02;    
 		//delaym(5);
 		vTaskDelayUntil( &xLastWakeTime, pdMS_TO_TICKS( 5000 ) );	
 		vTaskResume(xGreenHandle);
-		vTaskResume(xHazardHandle);
 
 		
 		if(run){
 		vTaskPrioritySet(NULL, 1);
 		vTaskPrioritySet(xHazardHandle, 4);
+		vTaskResume(xHazardHandle);
 		}
 
 		else
@@ -175,24 +233,24 @@ static void vTask2( void *pvParameters )
 	  TickType_t xLastWakeTime;
 	  xLastWakeTime = xTaskGetTickCount();
 		vTaskSuspend(xRedHandle);
-		vTaskSuspend(xHazardHandle);
-
     GPIO_PORTF_DATA_R = 0x08;
 		
 		vTaskDelayUntil( &xLastWakeTime, pdMS_TO_TICKS( 2500 ) );	
 		vTaskResume(xRedHandle);
-		vTaskResume(xHazardHandle);
+
 
 		
 				
-		vTaskPrioritySet(NULL, 2);
 		if(run){
 		vTaskPrioritySet(NULL, 1);
 		vTaskPrioritySet(xHazardHandle, 4);
+		vTaskResume(xHazardHandle);
+
 		}
 
 		else
 			{
+		vTaskPrioritySet(NULL, 2);
 		vTaskPrioritySet(xRedHandle, 3);}
 
 
@@ -224,9 +282,8 @@ static void vTask2( void *pvParameters )
 	
 	vTaskResume(xRedHandle);
 	vTaskResume(xGreenHandle);
-
-		
-	vTaskPrioritySet(NULL, 1);
+	vTaskSuspend(xHazardHandle);
+	
 	}
 		}      
 
@@ -276,8 +333,12 @@ int main()
 	xTaskCreate( vTask1, (const portCHAR *)"red light", 256, NULL,2 , &xRedHandle );
 	xTaskCreate( vTask2, (const portCHAR *)"green light", 256, NULL, 3, &xGreenHandle );
 	xTaskCreate( vTask3, (const portCHAR *)"hazard", 256, NULL, 1, &xHazardHandle );
+	
+	vTaskSuspend(xTrainHandle);
+	vTaskSuspend(xHazardHandle);
 
-		vTaskStartScheduler();
+
+	vTaskStartScheduler();
 	
 	}	
 		
