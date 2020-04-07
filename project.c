@@ -1,12 +1,7 @@
 #include <HAL.h>
 #include "tm4c123gh6pm.h"
-#include "LCD.h"
-#include "Strings.h"
 #include <FreeRTOS.h>
 #include <task.h>
-#include <semphr.h>
-#include <timers.h>
-
 
 
 int run=0;
@@ -18,15 +13,23 @@ xTaskHandle xGreenHandle;
 xTaskHandle xTrainHandle;
 xTaskHandle xHazardHandle;
 
+uint32_t SystemCoreClock;
+static uint8_t switchPressed_;
 
 static void vTask1( void *pvParameters );
 static void vTask2( void *pvParameters );
 static void vTask3( void *pvParameters );
+void vSwitchTask(void *pvParameters);
+void PortF_Init(void);
 
 
+
+/*The idle application handler */
 void vApplicationIdleHook(){
 		for( ;; )
 	{
+		
+/*The case where the train button is pressed, the train task is immediately resumed*/
 if(train==1){
 	
 	train=2;
@@ -34,10 +37,23 @@ if(train==1){
 
 	}
 
-	if(train==3){
 	
-	train=0;
-	suspended=0;
+/*Hadling If the train task is citt off by the second switch and the hazard button was pressed during the train mode */
+else if((train==3)& run){
+		suspended=0;
+	  train=0;
+		vTaskSuspend(xTrainHandle);
+		
+		vTaskResume(xHazardHandle);
+		vTaskResume(xRedHandle);
+		vTaskResume(xGreenHandle);
+	}
+
+/*The case where the train second switch is pressed (indicating leaving before the safety period) */
+else if(train==3){
+	
+	  train=0;
+	  suspended=0;
 	  vTaskSuspend(xTrainHandle);
 		
 		vTaskResume(xRedHandle);
@@ -48,17 +64,10 @@ if(train==1){
 }
 	}
 
+	
 
-void PortF_Init(void);
-// SystemCoreClock is referenced in FreeRTOSConfig.h.  It will be defined here and assigned
-//	the bus clock frequency when the hardware is initialized.
-uint32_t SystemCoreClock;
 
-static SemaphoreHandle_t switchSemaphore_;
-static uint8_t switchPressed_;
-
-// These are the period task creation parameters.
-
+/*Initializing the needed pins*/
 void PortF_Init(void){ 
   SYSCTL_RCGCGPIO_R |= 0x00000020; // activate clock for port F
   GPIO_PORTF_DIR_R |= 0x0E;  
@@ -69,66 +78,39 @@ void PortF_Init(void){
   GPIO_PORTF_DEN_R = 0x0E;          // 7) enable digital pins PF3-PF1        
 }
 
-// Call when there is a catastophic problem.
-static void ErrHandler(void)
-{
-	while (1) {}
-}
-
-
 
 
 void SwitchHandler(uint32_t pinMap)
 {
 	
-	// Disable interrupts for both switches.
+  //Disable interrupts for both switches.
 	GPIO_DisarmInterrupt(&PINDEF(PORTF, (PinName_t)(PIN0 | PIN4)));
 	
-	// Record the switch state for the switch task.
+	//Record the switch state for the switch task.
 	switchPressed_ = (uint8_t)pinMap;
 	
 	//if hazard mode-> raise the hazard mode flag without switching the task
 	
 	if (switchPressed_ & PIN4) {
 		run=1;
+		GPIO_RearmInterrupt(&PINDEF(PORTF, (PinName_t)(PIN0 | PIN4)));
+
 		}
 
-	//if train mode-> wake up the train task and force switching from the ISR to it
-		//TODO implement the second train switch 
 	else{
-		
-		//vTaskPrioritySet(xTrainHandle, 5);
-
+		//if train mode is aleady running and second train switch is pressed -> change te state of the flag to indicate the end of the task
 		if(train==2){
 		train=3;
 		GPIO_RearmInterrupt(&PINDEF(PORTF, (PinName_t)(PIN0 | PIN4)));
 
 		}
+		
+    //if train mode requested-> raise the train flag		
 		else if(train==0 ){
 		train=1;
 		GPIO_RearmInterrupt(&PINDEF(PORTF, (PinName_t)(PIN0 | PIN4)));
 
 		}
-		/*if(train==1){
-			train=2;
-		}
-	
-		// This will attempt a wake the higher priority SwitchTask and continue
-	//	execution there.
-		
-		else{
-			if(train==3){
-				vTaskResume(xTrainHandle);}*/
-
-	/*BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-	
-	// Give the semaphore and unblock the SwitchTask.
-	xSemaphoreGiveFromISR(switchSemaphore_, &xHigherPriorityTaskWoken);
-
-	// If the SwitchTask was successfully woken, then yield execution to it
-	//	and go there now (instead of changing context to another task).
-	portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
-		}*/
 	}
 	
 	
@@ -137,7 +119,7 @@ void SwitchHandler(uint32_t pinMap)
 
 
 
-
+/*The train mode*/
 void vSwitchTask(void *pvParameters)
 {
 	
@@ -155,7 +137,15 @@ void vSwitchTask(void *pvParameters)
 		GPIO_PORTF_DATA_R = 0xe;    
 		vTaskDelayUntil( &xLastWakeTime, pdMS_TO_TICKS( 5000 ) );	
 		
-		
+/*checking if hazard mode is request, so we can jump right into it instead of the normal mode */
+if(run){
+		train=0;
+		vTaskResume(xHazardHandle);
+		vTaskSuspend(xTrainHandle);
+
+		}
+	
+	/*If the train task didn't stop immediately when the switch is pressed, finish properly */
 if(suspended){	
 	  suspended=0;
 	  train=0;
@@ -164,36 +154,13 @@ if(suspended){
 		vTaskSuspend(xTrainHandle);
 }
 
-
-
-
-		/*// Block until the switch ISR has signaled a switch press event...
-		BaseType_t taken = xSemaphoreTake(switchSemaphore_, portMAX_DELAY);
-		
-			// Rearm interrupts for both switches.
-			GPIO_RearmInterrupt(&PINDEF(PORTF, (PinName_t)(PIN0 | PIN4)));
-		
-		if (taken == pdPASS) {
-		
-			TickType_t xLastWakeTime = xTaskGetTickCount();
-
-		GPIO_PORTF_DATA_R = 0xe;    
-		vTaskDelay( pdMS_TO_TICKS( 6000 ) );	
-			}*/
 		}
-		
-	
-	
-		
 		}
 	
 	
-
+/*The North/South Junction*/
 	static void vTask1( void *pvParameters )
 {
-
-
-	
 	for( ;; )
 	{
 		TickType_t xLastWakeTime;
@@ -203,14 +170,14 @@ if(suspended){
 
 
 		GPIO_PORTF_DATA_R = 0x02;    
-		//delaym(5);
 		vTaskDelayUntil( &xLastWakeTime, pdMS_TO_TICKS( 5000 ) );	
 		vTaskResume(xGreenHandle);
 
 		
+/*Checking if Hazard mode is on-> resume the hazard task
+	else switch to the East/West task*/		
+
 		if(run){
-		vTaskPrioritySet(NULL, 1);
-		vTaskPrioritySet(xHazardHandle, 4);
 		vTaskResume(xHazardHandle);
 		}
 
@@ -218,13 +185,11 @@ if(suspended){
 			{
 		vTaskPrioritySet(NULL, 2);
 		vTaskPrioritySet(xGreenHandle, 3);}
-		
-
-
 }
 }
 
 
+/*The East/West junction*/
 static void vTask2( void *pvParameters )
 {
 
@@ -238,12 +203,9 @@ static void vTask2( void *pvParameters )
 		vTaskDelayUntil( &xLastWakeTime, pdMS_TO_TICKS( 2500 ) );	
 		vTaskResume(xRedHandle);
 
-
-		
-				
+/*Checking if Hazard mode is on-> resume the hazard task
+	else switch to the North/South task*/		
 		if(run){
-		vTaskPrioritySet(NULL, 1);
-		vTaskPrioritySet(xHazardHandle, 4);
 		vTaskResume(xHazardHandle);
 
 		}
@@ -260,9 +222,10 @@ static void vTask2( void *pvParameters )
 
 
 
-	static void vTask3( void *pvParameters )
-{
 
+/*Hazard mode*/
+static void vTask3( void *pvParameters )
+{
 
 	for( ;; )
 	{
@@ -271,7 +234,6 @@ static void vTask2( void *pvParameters )
 	TickType_t xLastWakeTime;
 	xLastWakeTime = xTaskGetTickCount();
 		
-	GPIO_RearmInterrupt(&PINDEF(PORTF, (PinName_t)(PIN0 | PIN4)));
 
 	vTaskSuspend(xRedHandle);
 	vTaskSuspend(xGreenHandle);
@@ -300,9 +262,6 @@ static int InitHardware(void)
 	// Must store the frequency in SystemCoreClock for FreeRTOS to use.
 	SystemCoreClock = PLL_GetBusClockFreq();
 
-	// These are the digital outputs for the LEDs.
-	//GPIO_EnableDO(PORTC, PIN5 | PIN6 | PIN7, DRIVE_2MA, PULL_DOWN);
-	//GPIO_InitPort(PORTF);
 	
 	// These are the digital intputs for the onboard buttons.
 	GPIO_EnableDI(PORTF, PIN0 | PIN4, PULL_UP);
@@ -322,17 +281,14 @@ static int InitHardware(void)
 int main()
 {
 
+	//initialize all ports and interrupts
 	InitHardware();
 	
-	// Create the semaphore that the switch ISR and task will synchronize on.
-	switchSemaphore_ = xSemaphoreCreateBinary();
-	
-	if (switchSemaphore_ != NULL) {
-		
+	//creating the 4 tasks and suspending the ones that need triggers (train,hazard)
 	xTaskCreate(vSwitchTask, (const portCHAR *)"train", 256, NULL, 5, &xTrainHandle);
-	xTaskCreate( vTask1, (const portCHAR *)"red light", 256, NULL,2 , &xRedHandle );
-	xTaskCreate( vTask2, (const portCHAR *)"green light", 256, NULL, 3, &xGreenHandle );
-	xTaskCreate( vTask3, (const portCHAR *)"hazard", 256, NULL, 1, &xHazardHandle );
+	xTaskCreate( vTask1, (const portCHAR *)"red light", 256, NULL,3 , &xRedHandle );
+	xTaskCreate( vTask2, (const portCHAR *)"green light", 256, NULL, 2, &xGreenHandle );
+	xTaskCreate( vTask3, (const portCHAR *)"hazard", 256, NULL, 4, &xHazardHandle );
 	
 	vTaskSuspend(xTrainHandle);
 	vTaskSuspend(xHazardHandle);
@@ -340,7 +296,7 @@ int main()
 
 	vTaskStartScheduler();
 	
-	}	
+	
 		
 	for (;;);
 
